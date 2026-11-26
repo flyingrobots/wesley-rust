@@ -1041,6 +1041,72 @@ laws:
     }
 
     #[test]
+    fn validators_whose_names_collide_are_disambiguated_in_law_order() {
+        let sdl = r#"
+            scalar URL
+            scalar Url
+            scalar fooBar
+            scalar foo_bar
+        "#;
+        let law_ir = load_weslaw_yaml(
+            r#"
+apiVersion: weslaw/v1
+schema:
+  family: colliding-validators
+  hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  source: inline.graphql
+laws:
+  - id: collide.url.upper
+    status: active
+    kind: scalarSemantics
+    subject: scalar:URL
+    semantics:
+      representation: integer
+      minInclusive: 1
+    rationale: Normalises to url.
+  - id: collide.url.title
+    status: active
+    kind: scalarSemantics
+    subject: scalar:Url
+    semantics:
+      representation: integer
+      minInclusive: 2
+    rationale: Also normalises to url.
+  - id: collide.foo.camel
+    status: active
+    kind: scalarSemantics
+    subject: scalar:fooBar
+    semantics:
+      representation: integer
+      maxInclusive: 3
+    rationale: Normalises to foo_bar.
+  - id: collide.foo.snake
+    status: active
+    kind: scalarSemantics
+    subject: scalar:foo_bar
+    semantics:
+      representation: integer
+      maxInclusive: 4
+    rationale: Also normalises to foo_bar.
+"#,
+        )
+        .expect("law should load");
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+
+        let actual = emit_rust_with_operations_and_law(&ir, &[], "schema", "law", &law_ir);
+
+        for name in [
+            "validate_url(",
+            "validate_url_2(",
+            "validate_foo_bar(",
+            "validate_foo_bar_2(",
+        ] {
+            assert!(actual.contains(&format!("pub fn {name}")), "{actual}");
+        }
+        compile_generated_files("colliding_validators", &actual, "");
+    }
+
+    #[test]
     fn law_backed_generated_rust_compiles_as_crate() {
         let sdl = include_str!("../../../test/fixtures/weslaw/contract-bundle-shape.graphql");
         let law_ir = load_weslaw_yaml(include_str!(
