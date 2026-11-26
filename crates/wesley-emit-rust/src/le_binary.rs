@@ -14,11 +14,13 @@
 //! trailing input via `Reader::remaining()`, so a decoder cannot silently accept
 //! a padded or corrupted envelope.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use wesley_core::{OperationType, SchemaOperation, WesleyIR};
 use wesley_emit_codec::{plan, CodecDef, CodecOp, FieldPlan, ScalarKind};
 
+use crate::recursion::boxed_edges;
 use crate::{
     operation_scope_name, rust_field_name, rust_type_name, rust_variant_name, to_snake_case,
 };
@@ -49,8 +51,9 @@ pub fn emit_le_binary_rust(
     );
     emit_runtime_port_contract(&mut out);
 
+    let boxed = boxed_edges(ir);
     for def in plan(ir, operations) {
-        render_def(&mut out, &def);
+        render_def(&mut out, &def, &boxed);
     }
 
     out
@@ -128,13 +131,24 @@ fn emit_runtime_port_contract(out: &mut String) {
 }
 
 /// Render one codec definition into the output buffer.
-fn render_def(out: &mut String, def: &CodecDef) {
+fn render_def(out: &mut String, def: &CodecDef, boxed: &BTreeSet<(String, String)>) {
     match def {
         CodecDef::Enum { name, variants } => {
             render_enum(out, &rust_type_name(name), &to_snake_case(name), variants);
         }
         CodecDef::Struct { name, fields, .. } => {
-            render_struct(out, &rust_type_name(name), &to_snake_case(name), fields);
+            let boxed_fields = fields
+                .iter()
+                .filter(|field| boxed.contains(&(name.clone(), field.name.clone())))
+                .map(|field| field.name.as_str())
+                .collect();
+            render_struct(
+                out,
+                &rust_type_name(name),
+                &to_snake_case(name),
+                fields,
+                &boxed_fields,
+            );
         }
         CodecDef::Operation {
             operation_type,
@@ -143,7 +157,7 @@ fn render_def(out: &mut String, def: &CodecDef) {
         } => {
             let ty = request_type_name(*operation_type, field_name);
             let snake = to_snake_case(&ty);
-            render_struct(out, &ty, &snake, fields);
+            render_struct(out, &ty, &snake, fields, &BTreeSet::new());
         }
     }
 }
@@ -217,7 +231,13 @@ fn render_enum(out: &mut String, ty: &str, snake: &str, variants: &[String]) {
     let _ = writeln!(out, "}}");
 }
 
-fn render_struct(out: &mut String, ty: &str, snake: &str, fields: &[FieldPlan]) {
+fn render_struct(
+    out: &mut String,
+    ty: &str,
+    snake: &str,
+    fields: &[FieldPlan],
+    boxed_fields: &BTreeSet<&str>,
+) {
     emit_wrappers(out, ty, snake);
 
     let _ = write!(
@@ -244,7 +264,8 @@ fn render_struct(out: &mut String, ty: &str, snake: &str, fields: &[FieldPlan]) 
         let _ = writeln!(out, "    Ok({ty} {{");
         for field in fields {
             let name = rust_field_name(&field.name);
-            let _ = writeln!(out, "        {name}: {}?,", decode_op(&field.op));
+            let is_boxed = boxed_fields.contains(field.name.as_str());
+            let _ = writeln!(out, "        {name}: {}?,", decode_op(&field.op, is_boxed));
         }
         let _ = writeln!(out, "    }})");
     }
@@ -278,15 +299,21 @@ fn encode_op(expr: &str, op: &CodecOp) -> String {
 }
 
 /// Build the decode expression (of type `Result<_, CodecError>`) for `op`.
-fn decode_op(op: &CodecOp) -> String {
+fn decode_op(op: &CodecOp, boxed: bool) -> String {
     match op {
-        CodecOp::Option(inner) => format!("reader.read_option(|reader| {})", decode_op(inner)),
-        CodecOp::List(inner) => format!("reader.read_list(|reader| {})", decode_op(inner)),
+        CodecOp::Option(inner) => {
+            format!("reader.read_option(|reader| {})", decode_op(inner, boxed))
+        }
+        CodecOp::List(inner) => format!("reader.read_list(|reader| {})", decode_op(inner, false)),
         CodecOp::Scalar(ScalarKind::Bool) => "reader.read_bool()".to_string(),
         CodecOp::Scalar(ScalarKind::Int) => "reader.read_i32_le()".to_string(),
         // Widening an `f32` to the model's `f64` is exact.
         CodecOp::Scalar(ScalarKind::Float) => "reader.read_f32_le().map(f64::from)".to_string(),
         CodecOp::Scalar(ScalarKind::String) => "reader.read_string()".to_string(),
+        // A cycle edge is held as `Box<T>` in the model (see `recursion`).
+        CodecOp::Named(name) if boxed => {
+            format!("dec_{}(reader).map(Box::new)", to_snake_case(name))
+        }
         CodecOp::Named(name) => format!("dec_{}(reader)", to_snake_case(name)),
     }
 }

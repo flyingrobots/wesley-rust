@@ -11,6 +11,7 @@ use wesley_core::{
 };
 
 mod le_binary;
+mod recursion;
 pub use le_binary::{
     emit_le_binary_rust, DEFAULT_CODEC_IMPORT as LE_BINARY_RUST_DEFAULT_CODEC_IMPORT,
     LE_BINARY_GENERATOR_NAME as LE_BINARY_RUST_GENERATOR_NAME,
@@ -83,6 +84,7 @@ impl RustFile {
     }
 
     fn from_ir_and_operations(ir: &WesleyIR, operations: &[SchemaOperation]) -> Self {
+        let boxed = recursion::boxed_edges(ir);
         let mut items = Vec::new();
         let root_type_names = operations
             .iter()
@@ -101,10 +103,12 @@ impl RustFile {
                     target: RustType::String,
                 })),
                 TypeKind::Object | TypeKind::Interface | TypeKind::InputObject => {
-                    items.push(RustItem::Struct(struct_from_type(type_def)));
+                    items.push(RustItem::Struct(struct_from_type(type_def, &boxed)));
                 }
                 TypeKind::Enum => items.push(RustItem::Enum(enum_from_type(type_def))),
-                TypeKind::Union => items.push(RustItem::Enum(union_enum_from_type(type_def))),
+                TypeKind::Union => {
+                    items.push(RustItem::Enum(union_enum_from_type(type_def, &boxed)));
+                }
             }
         }
 
@@ -218,6 +222,7 @@ enum RustType {
     Named(String),
     Vec(Box<RustType>),
     Option(Box<RustType>),
+    Box(Box<RustType>),
 }
 
 fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1) -> Vec<RustLawItem> {
@@ -305,18 +310,37 @@ fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<Stri
         .collect()
 }
 
-fn struct_from_type(type_def: &TypeDefinition) -> RustStruct {
+fn struct_from_type(type_def: &TypeDefinition, boxed: &BTreeSet<(String, String)>) -> RustStruct {
     RustStruct {
         name: rust_type_name(&type_def.name),
-        fields: type_def.fields.iter().map(field_from_ir).collect(),
+        fields: type_def
+            .fields
+            .iter()
+            .map(|field| {
+                let is_cycle_edge = boxed.contains(&(type_def.name.clone(), field.name.clone()));
+                field_from_ir(field, is_cycle_edge)
+            })
+            .collect(),
     }
 }
 
-fn field_from_ir(field: &Field) -> RustField {
+fn field_from_ir(field: &Field, is_cycle_edge: bool) -> RustField {
+    let ty = rust_type_from_reference(&field.r#type);
     RustField {
         source_name: field.name.clone(),
         rust_name: rust_field_name(&field.name),
-        ty: rust_type_from_reference(&field.r#type),
+        ty: if is_cycle_edge { box_named(ty) } else { ty },
+    }
+}
+
+/// Puts the named type inside `ty` behind a `Box`: `Node` becomes `Box<Node>`
+/// and `Option<Node>` becomes `Option<Box<Node>>`. Only by-value references
+/// are cycle edges (see [`recursion`]), so a `Vec` never reaches here.
+fn box_named(ty: RustType) -> RustType {
+    match ty {
+        RustType::Named(_) => RustType::Box(Box::new(ty)),
+        RustType::Option(inner) => RustType::Option(Box::new(box_named(*inner))),
+        other => other,
     }
 }
 
@@ -336,17 +360,25 @@ fn enum_from_type(type_def: &TypeDefinition) -> RustEnum {
     }
 }
 
-fn union_enum_from_type(type_def: &TypeDefinition) -> RustEnum {
+fn union_enum_from_type(type_def: &TypeDefinition, boxed: &BTreeSet<(String, String)>) -> RustEnum {
     RustEnum {
         name: rust_type_name(&type_def.name),
         derive_eq: false,
         variants: type_def
             .union_members
             .iter()
-            .map(|member| RustVariant {
-                source_name: member.clone(),
-                rust_name: rust_variant_name(member),
-                payload: Some(RustType::Named(rust_type_name(member))),
+            .map(|member| {
+                let payload = RustType::Named(rust_type_name(member));
+                let is_cycle_edge = boxed.contains(&(type_def.name.clone(), member.clone()));
+                RustVariant {
+                    source_name: member.clone(),
+                    rust_name: rust_variant_name(member),
+                    payload: Some(if is_cycle_edge {
+                        box_named(payload)
+                    } else {
+                        payload
+                    }),
+                }
             })
             .collect(),
     }
@@ -633,6 +665,11 @@ fn print_type(out: &mut String, ty: &RustType) {
         }
         RustType::Option(item) => {
             out.push_str("Option<");
+            print_type(out, item);
+            out.push('>');
+        }
+        RustType::Box(item) => {
+            out.push_str("Box<");
             print_type(out, item);
             out.push('>');
         }
