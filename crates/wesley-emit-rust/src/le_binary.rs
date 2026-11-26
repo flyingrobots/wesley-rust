@@ -265,7 +265,13 @@ fn encode_op(expr: &str, op: &CodecOp) -> String {
         ),
         CodecOp::Scalar(ScalarKind::Bool) => format!("writer.write_bool({})", deref_copy(expr)),
         CodecOp::Scalar(ScalarKind::Int) => format!("writer.write_i32_le({})", deref_copy(expr)),
-        CodecOp::Scalar(ScalarKind::Float) => format!("writer.write_f32_le({})", deref_copy(expr)),
+        // The model holds `f64` (GraphQL `Float` is double precision) and the
+        // wire holds `f32` (the shared codec plan), so the encoder narrows
+        // explicitly, rounding to the nearest `f32` as the TypeScript codec's
+        // `writeF32Le(number)` does.
+        CodecOp::Scalar(ScalarKind::Float) => {
+            format!("writer.write_f32_le({} as f32)", deref_copy(expr))
+        }
         CodecOp::Scalar(ScalarKind::String) => format!("writer.write_string({expr})"),
         CodecOp::Named(name) => format!("enc_{}(writer, {expr})", to_snake_case(name)),
     }
@@ -278,7 +284,8 @@ fn decode_op(op: &CodecOp) -> String {
         CodecOp::List(inner) => format!("reader.read_list(|reader| {})", decode_op(inner)),
         CodecOp::Scalar(ScalarKind::Bool) => "reader.read_bool()".to_string(),
         CodecOp::Scalar(ScalarKind::Int) => "reader.read_i32_le()".to_string(),
-        CodecOp::Scalar(ScalarKind::Float) => "reader.read_f32_le()".to_string(),
+        // Widening an `f32` to the model's `f64` is exact.
+        CodecOp::Scalar(ScalarKind::Float) => "reader.read_f32_le().map(f64::from)".to_string(),
         CodecOp::Scalar(ScalarKind::String) => "reader.read_string()".to_string(),
         CodecOp::Named(name) => format!("dec_{}(reader)", to_snake_case(name)),
     }

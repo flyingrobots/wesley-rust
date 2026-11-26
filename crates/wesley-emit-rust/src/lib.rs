@@ -1291,6 +1291,14 @@ struct PlaybackModeInput {{
     }
 
     #[test]
+    fn golden_codec_schema_compiles_with_its_models() {
+        compile_models_and_codecs(
+            "golden_codec_schema",
+            include_str!("../../../test/fixtures/typescript-emitter/le-binary-codec.graphql"),
+        );
+    }
+
+    #[test]
     fn float_codecs_narrow_on_write_and_widen_on_read_explicitly() {
         let sdl = r#"
             input Scale {

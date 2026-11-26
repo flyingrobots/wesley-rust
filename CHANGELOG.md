@@ -8,3 +8,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - `crates/wesley-emit-rust`, Wesley's existing emitter, moved from flyingrobots/wesley at `bfff0f9a` (0.3.0-alpha.4) with its history and the fixtures its tests read. It depends on the published `wesley-core` and `wesley-emit-codec` 0.3.0-alpha.4 (flyingrobots/wesley#882).
 - The repository, its license, and the rules for how the target generates code (flyingrobots/parley#116, flyingrobots/wesley#882).
+
+### Fixed
+
+- A `Float` field's LE-binary codec now compiles against its model (#3). The wire width stays **`f32`**: it is the shared codec plan's contract (`wesley-emit-codec` `ScalarKind::Float`), and flyingrobots/wesley-typescript's codecs write the same four bytes, so changing it here alone would split the two on the wire. The model stays **`f64`**, because GraphQL `Float` is double precision and the serde model must hold any JSON value the schema allows. The codec converts at the boundary, explicitly: the encoder writes `value as f32`, which rounds to the nearest `f32` (ties to even, out-of-range values to infinity), exactly as the TypeScript codec's `writeF32Le(number)` narrows a JavaScript number, and the decoder widens with `f64::from`, which is exact. Encoding is therefore lossy for an `f64` that has no exact `f32`, on both targets alike; a schema that needs full double precision on the wire needs a wider `ScalarKind` in the shared plan, which is a contract change for both targets, not a fix here.
