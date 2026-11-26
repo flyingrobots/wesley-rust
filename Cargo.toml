@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/wesley-emit-rust"]
+resolver = "2"
