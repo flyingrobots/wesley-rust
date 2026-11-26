@@ -17,13 +17,12 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use wesley_core::{OperationType, SchemaOperation, WesleyIR};
+use wesley_core::{SchemaOperation, WesleyIR};
 use wesley_emit_codec::{plan, CodecDef, CodecOp, FieldPlan, ScalarKind};
 
+use crate::names::Names;
+use crate::operation_scope_name;
 use crate::recursion::boxed_edges;
-use crate::{
-    operation_scope_name, rust_field_name, rust_type_name, rust_variant_name, to_snake_case,
-};
 
 /// The default Rust module path the emitted codec imports its runtime from.
 pub const DEFAULT_CODEC_IMPORT: &str = "crate::codec";
@@ -52,8 +51,9 @@ pub fn emit_le_binary_rust(
     emit_runtime_port_contract(&mut out);
 
     let boxed = boxed_edges(ir);
+    let names = Names::new(ir, operations);
     for def in plan(ir, operations) {
-        render_def(&mut out, &def, &boxed);
+        render_def(&mut out, &def, &boxed, &names);
     }
 
     out
@@ -131,10 +131,11 @@ fn emit_runtime_port_contract(out: &mut String) {
 }
 
 /// Render one codec definition into the output buffer.
-fn render_def(out: &mut String, def: &CodecDef, boxed: &BTreeSet<(String, String)>) {
+fn render_def(out: &mut String, def: &CodecDef, boxed: &BTreeSet<(String, String)>, names: &Names) {
     match def {
         CodecDef::Enum { name, variants } => {
-            render_enum(out, &rust_type_name(name), &to_snake_case(name), variants);
+            let ty = names.type_name(name);
+            render_enum(out, &ty, &names.codec_function(name), variants, names);
         }
         CodecDef::Struct { name, fields, .. } => {
             let boxed_fields = fields
@@ -142,33 +143,21 @@ fn render_def(out: &mut String, def: &CodecDef, boxed: &BTreeSet<(String, String
                 .filter(|field| boxed.contains(&(name.clone(), field.name.clone())))
                 .map(|field| field.name.as_str())
                 .collect();
-            render_struct(
-                out,
-                &rust_type_name(name),
-                &to_snake_case(name),
-                fields,
-                &boxed_fields,
-            );
+            let ty = names.type_name(name);
+            let snake = names.codec_function(name);
+            render_struct(out, &ty, &snake, fields, &boxed_fields, names);
         }
         CodecDef::Operation {
             operation_type,
             field_name,
             fields,
         } => {
-            let ty = request_type_name(*operation_type, field_name);
-            let snake = to_snake_case(&ty);
-            render_struct(out, &ty, &snake, fields, &BTreeSet::new());
+            let scope = operation_scope_name(*operation_type);
+            let ty = names.request_name(scope, field_name);
+            let snake = names.request_codec_function(scope, field_name);
+            render_struct(out, &ty, &snake, fields, &BTreeSet::new(), names);
         }
     }
-}
-
-/// The Rust name of an operation's variables struct (`<Operation><Field>Request`).
-fn request_type_name(operation_type: OperationType, field_name: &str) -> String {
-    rust_type_name(&format!(
-        "{}{}Request",
-        operation_scope_name(operation_type),
-        rust_type_name(field_name)
-    ))
 }
 
 /// Emit the public `encode_*` / `decode_*` wrappers shared by every type.
@@ -195,7 +184,7 @@ fn emit_wrappers(out: &mut String, ty: &str, snake: &str) {
     );
 }
 
-fn render_enum(out: &mut String, ty: &str, snake: &str, variants: &[String]) {
+fn render_enum(out: &mut String, ty: &str, snake: &str, variants: &[String], names: &Names) {
     emit_wrappers(out, ty, snake);
 
     let _ = write!(
@@ -204,7 +193,7 @@ fn render_enum(out: &mut String, ty: &str, snake: &str, variants: &[String]) {
     );
     let _ = writeln!(out, "    match value {{");
     for (index, value) in variants.iter().enumerate() {
-        let variant = rust_variant_name(value);
+        let variant = names.variant_name(ty, value);
         let _ = writeln!(
             out,
             "        {ty}::{variant} => writer.write_u32_le({index}),"
@@ -220,7 +209,7 @@ fn render_enum(out: &mut String, ty: &str, snake: &str, variants: &[String]) {
     let _ = writeln!(out, "    let discriminant = reader.read_u32_le()?;");
     let _ = writeln!(out, "    match discriminant {{");
     for (index, value) in variants.iter().enumerate() {
-        let variant = rust_variant_name(value);
+        let variant = names.variant_name(ty, value);
         let _ = writeln!(out, "        {index} => Ok({ty}::{variant}),");
     }
     let _ = writeln!(
@@ -237,6 +226,7 @@ fn render_struct(
     snake: &str,
     fields: &[FieldPlan],
     boxed_fields: &BTreeSet<&str>,
+    names: &Names,
 ) {
     emit_wrappers(out, ty, snake);
 
@@ -248,8 +238,8 @@ fn render_struct(
         let _ = writeln!(out, "    let _ = (writer, value);");
     }
     for field in fields {
-        let access = format!("&value.{}", rust_field_name(&field.name));
-        let _ = writeln!(out, "    {};", encode_op(&access, &field.op));
+        let access = format!("&value.{}", names.field_name(ty, &field.name));
+        let _ = writeln!(out, "    {};", encode_op(&access, &field.op, names));
     }
     let _ = writeln!(out, "}}");
 
@@ -263,9 +253,13 @@ fn render_struct(
     } else {
         let _ = writeln!(out, "    Ok({ty} {{");
         for field in fields {
-            let name = rust_field_name(&field.name);
+            let name = names.field_name(ty, &field.name);
             let is_boxed = boxed_fields.contains(field.name.as_str());
-            let _ = writeln!(out, "        {name}: {}?,", decode_op(&field.op, is_boxed));
+            let _ = writeln!(
+                out,
+                "        {name}: {}?,",
+                decode_op(&field.op, is_boxed, names)
+            );
         }
         let _ = writeln!(out, "    }})");
     }
@@ -274,15 +268,15 @@ fn render_struct(
 
 /// Build the encode expression for a value reachable as the `&T` expression
 /// `expr`.
-fn encode_op(expr: &str, op: &CodecOp) -> String {
+fn encode_op(expr: &str, op: &CodecOp, names: &Names) -> String {
     match op {
         CodecOp::Option(inner) => format!(
             "writer.write_option({expr}, |writer, x| {})",
-            encode_op("x", inner)
+            encode_op("x", inner, names)
         ),
         CodecOp::List(inner) => format!(
             "writer.write_list({expr}, |writer, x| {})",
-            encode_op("x", inner)
+            encode_op("x", inner, names)
         ),
         CodecOp::Scalar(ScalarKind::Bool) => format!("writer.write_bool({})", deref_copy(expr)),
         CodecOp::Scalar(ScalarKind::Int) => format!("writer.write_i32_le({})", deref_copy(expr)),
@@ -294,17 +288,23 @@ fn encode_op(expr: &str, op: &CodecOp) -> String {
             format!("writer.write_f32_le({} as f32)", deref_copy(expr))
         }
         CodecOp::Scalar(ScalarKind::String) => format!("writer.write_string({expr})"),
-        CodecOp::Named(name) => format!("enc_{}(writer, {expr})", to_snake_case(name)),
+        CodecOp::Named(name) => format!("enc_{}(writer, {expr})", names.codec_function(name)),
     }
 }
 
 /// Build the decode expression (of type `Result<_, CodecError>`) for `op`.
-fn decode_op(op: &CodecOp, boxed: bool) -> String {
+fn decode_op(op: &CodecOp, boxed: bool, names: &Names) -> String {
     match op {
         CodecOp::Option(inner) => {
-            format!("reader.read_option(|reader| {})", decode_op(inner, boxed))
+            format!(
+                "reader.read_option(|reader| {})",
+                decode_op(inner, boxed, names)
+            )
         }
-        CodecOp::List(inner) => format!("reader.read_list(|reader| {})", decode_op(inner, false)),
+        CodecOp::List(inner) => format!(
+            "reader.read_list(|reader| {})",
+            decode_op(inner, false, names)
+        ),
         CodecOp::Scalar(ScalarKind::Bool) => "reader.read_bool()".to_string(),
         CodecOp::Scalar(ScalarKind::Int) => "reader.read_i32_le()".to_string(),
         // Widening an `f32` to the model's `f64` is exact.
@@ -312,9 +312,9 @@ fn decode_op(op: &CodecOp, boxed: bool) -> String {
         CodecOp::Scalar(ScalarKind::String) => "reader.read_string()".to_string(),
         // A cycle edge is held as `Box<T>` in the model (see `recursion`).
         CodecOp::Named(name) if boxed => {
-            format!("dec_{}(reader).map(Box::new)", to_snake_case(name))
+            format!("dec_{}(reader).map(Box::new)", names.codec_function(name))
         }
-        CodecOp::Named(name) => format!("dec_{}(reader)", to_snake_case(name)),
+        CodecOp::Named(name) => format!("dec_{}(reader)", names.codec_function(name)),
     }
 }
 
@@ -328,7 +328,9 @@ fn deref_copy(expr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wesley_core::{Field, TypeDefinition, TypeKind, TypeListWrapper, TypeReference};
+    use wesley_core::{
+        Field, OperationType, TypeDefinition, TypeKind, TypeListWrapper, TypeReference,
+    };
 
     fn scalar(base: &str, nullable: bool) -> TypeReference {
         TypeReference {

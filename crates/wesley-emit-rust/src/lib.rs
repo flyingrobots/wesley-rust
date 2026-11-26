@@ -5,12 +5,15 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
+
+use names::Names;
 use wesley_core::{
-    Field, LawEntryBodyV1, LawIrV1, OperationArgument, OperationType, ScalarRepresentationV1,
+    LawEntryBodyV1, LawIrV1, OperationArgument, OperationType, ScalarRepresentationV1,
     SchemaOperation, TypeDefinition, TypeKind, TypeReference, WesleyIR,
 };
 
 mod le_binary;
+mod names;
 mod recursion;
 pub use le_binary::{
     emit_le_binary_rust, DEFAULT_CODEC_IMPORT as LE_BINARY_RUST_DEFAULT_CODEC_IMPORT,
@@ -66,7 +69,7 @@ pub fn emit_rust_with_operations_and_law(
         schema_hash: schema_hash.to_string(),
         law_hash: law_hash.to_string(),
     });
-    file.law_items = rust_law_items_from_ir(ir, law_ir);
+    file.law_items = rust_law_items_from_ir(ir, law_ir, &Names::new(ir, operations));
 
     print_file(&file)
 }
@@ -85,6 +88,7 @@ impl RustFile {
 
     fn from_ir_and_operations(ir: &WesleyIR, operations: &[SchemaOperation]) -> Self {
         let boxed = recursion::boxed_edges(ir);
+        let names = Names::new(ir, operations);
         let mut items = Vec::new();
         let root_type_names = operations
             .iter()
@@ -99,24 +103,24 @@ impl RustFile {
             match type_def.kind {
                 TypeKind::Scalar if is_builtin_scalar(&type_def.name) => {}
                 TypeKind::Scalar => items.push(RustItem::TypeAlias(RustTypeAlias {
-                    name: rust_type_name(&type_def.name),
+                    name: names.type_name(&type_def.name),
                     target: RustType::String,
                 })),
                 TypeKind::Object | TypeKind::Interface | TypeKind::InputObject => {
-                    items.push(RustItem::Struct(struct_from_type(type_def, &boxed)));
+                    items.push(RustItem::Struct(struct_from_type(type_def, &boxed, &names)));
                 }
-                TypeKind::Enum => items.push(RustItem::Enum(enum_from_type(type_def))),
+                TypeKind::Enum => items.push(RustItem::Enum(enum_from_type(type_def, &names))),
                 TypeKind::Union => {
-                    items.push(RustItem::Enum(union_enum_from_type(type_def, &boxed)));
+                    items.push(RustItem::Enum(union_enum_from_type(
+                        type_def, &boxed, &names,
+                    )));
                 }
             }
         }
 
-        items.extend(
-            operations
-                .iter()
-                .map(|operation| RustItem::Operation(operation_binding_from_schema(operation))),
-        );
+        items.extend(operations.iter().map(|operation| {
+            RustItem::Operation(operation_binding_from_schema(operation, &names))
+        }));
 
         Self {
             provenance: None,
@@ -225,16 +229,16 @@ enum RustType {
     Box(Box<RustType>),
 }
 
-fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1) -> Vec<RustLawItem> {
+fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1, names: &Names) -> Vec<RustLawItem> {
     law_ir
         .entries
         .iter()
         .filter_map(|entry| match &entry.body {
             LawEntryBodyV1::ScalarSemantics(body) => {
-                scalar_validator_from_law(&entry.subject, body)
+                scalar_validator_from_law(&entry.subject, body, names)
             }
             LawEntryBodyV1::VariantLaw(body) => {
-                variant_validator_from_law(ir, &entry.subject, body)
+                variant_validator_from_law(ir, &entry.subject, body, names)
             }
             LawEntryBodyV1::FootprintLaw(_)
             | LawEntryBodyV1::ChannelLaw(_)
@@ -246,6 +250,7 @@ fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1) -> Vec<RustLawItem> {
 fn scalar_validator_from_law(
     subject: &str,
     body: &wesley_core::ScalarSemanticsLawV1,
+    names: &Names,
 ) -> Option<RustLawItem> {
     if body.representation != ScalarRepresentationV1::Integer {
         return None;
@@ -254,7 +259,7 @@ fn scalar_validator_from_law(
 
     Some(RustLawItem::ScalarValidator(RustScalarValidator {
         function_name: format!("validate_{}", rust_field_name(scalar_name)),
-        scalar_name: rust_type_name(scalar_name),
+        scalar_name: names.type_name(scalar_name),
         min_inclusive: body.min_inclusive,
         max_inclusive: body.max_inclusive,
     }))
@@ -264,6 +269,7 @@ fn variant_validator_from_law(
     ir: &WesleyIR,
     subject: &str,
     body: &wesley_core::VariantLawV1,
+    names: &Names,
 ) -> Option<RustLawItem> {
     let input_name = subject.strip_prefix("input:")?;
     let input = ir.types.iter().find(|definition| {
@@ -273,27 +279,34 @@ fn variant_validator_from_law(
         .fields
         .iter()
         .find(|field| field.name == body.discriminator.field)?;
+    let input_type = names.type_name(input_name);
+    let enum_type = names.type_name(&body.discriminator.r#enum);
     let cases = body
         .cases
         .iter()
         .map(|case| RustVariantValidatorCase {
-            enum_variant: rust_variant_name(&case.value),
+            enum_variant: names.variant_name(&enum_type, &case.value),
             case_value: case.value.clone(),
-            requires: dynamic_variant_fields(input, &case.requires),
-            forbids: dynamic_variant_fields(input, &case.forbids),
+            requires: dynamic_variant_fields(input, &input_type, &case.requires, names),
+            forbids: dynamic_variant_fields(input, &input_type, &case.forbids, names),
         })
         .collect();
 
     Some(RustLawItem::VariantValidator(RustVariantValidator {
         function_name: format!("validate_{}_variant", rust_field_name(input_name)),
-        input_type: rust_type_name(input_name),
-        discriminator_field: rust_field_name(&discriminator.name),
-        enum_type: rust_type_name(&body.discriminator.r#enum),
+        discriminator_field: names.field_name(&input_type, &discriminator.name),
+        input_type,
+        enum_type,
         cases,
     }))
 }
 
-fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<String> {
+fn dynamic_variant_fields(
+    input: &TypeDefinition,
+    input_type: &str,
+    fields: &[String],
+    names: &Names,
+) -> Vec<String> {
     fields
         .iter()
         .filter_map(|field_name| {
@@ -301,8 +314,11 @@ fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<Stri
                 .fields
                 .iter()
                 .find(|field| field.name == *field_name)?;
-            if matches!(rust_type_from_reference(&field.r#type), RustType::Option(_)) {
-                Some(rust_field_name(field_name))
+            if matches!(
+                rust_type_from_reference(&field.r#type, names),
+                RustType::Option(_)
+            ) {
+                Some(names.field_name(input_type, field_name))
             } else {
                 None
             }
@@ -310,26 +326,27 @@ fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<Stri
         .collect()
 }
 
-fn struct_from_type(type_def: &TypeDefinition, boxed: &BTreeSet<(String, String)>) -> RustStruct {
+fn struct_from_type(
+    type_def: &TypeDefinition,
+    boxed: &BTreeSet<(String, String)>,
+    names: &Names,
+) -> RustStruct {
+    let name = names.type_name(&type_def.name);
     RustStruct {
-        name: rust_type_name(&type_def.name),
         fields: type_def
             .fields
             .iter()
             .map(|field| {
                 let is_cycle_edge = boxed.contains(&(type_def.name.clone(), field.name.clone()));
-                field_from_ir(field, is_cycle_edge)
+                let ty = rust_type_from_reference(&field.r#type, names);
+                RustField {
+                    source_name: field.name.clone(),
+                    rust_name: names.field_name(&name, &field.name),
+                    ty: if is_cycle_edge { box_named(ty) } else { ty },
+                }
             })
             .collect(),
-    }
-}
-
-fn field_from_ir(field: &Field, is_cycle_edge: bool) -> RustField {
-    let ty = rust_type_from_reference(&field.r#type);
-    RustField {
-        source_name: field.name.clone(),
-        rust_name: rust_field_name(&field.name),
-        ty: if is_cycle_edge { box_named(ty) } else { ty },
+        name,
     }
 }
 
@@ -344,35 +361,40 @@ fn box_named(ty: RustType) -> RustType {
     }
 }
 
-fn enum_from_type(type_def: &TypeDefinition) -> RustEnum {
+fn enum_from_type(type_def: &TypeDefinition, names: &Names) -> RustEnum {
+    let name = names.type_name(&type_def.name);
     RustEnum {
-        name: rust_type_name(&type_def.name),
         derive_eq: true,
         variants: type_def
             .enum_values
             .iter()
             .map(|value| RustVariant {
                 source_name: value.clone(),
-                rust_name: rust_variant_name(value),
+                rust_name: names.variant_name(&name, value),
                 payload: None,
             })
             .collect(),
+        name,
     }
 }
 
-fn union_enum_from_type(type_def: &TypeDefinition, boxed: &BTreeSet<(String, String)>) -> RustEnum {
+fn union_enum_from_type(
+    type_def: &TypeDefinition,
+    boxed: &BTreeSet<(String, String)>,
+    names: &Names,
+) -> RustEnum {
+    let name = names.type_name(&type_def.name);
     RustEnum {
-        name: rust_type_name(&type_def.name),
         derive_eq: false,
         variants: type_def
             .union_members
             .iter()
             .map(|member| {
-                let payload = RustType::Named(rust_type_name(member));
+                let payload = RustType::Named(names.type_name(member));
                 let is_cycle_edge = boxed.contains(&(type_def.name.clone(), member.clone()));
                 RustVariant {
                     source_name: member.clone(),
-                    rust_name: rust_variant_name(member),
+                    rust_name: names.variant_name(&name, member),
                     payload: Some(if is_cycle_edge {
                         box_named(payload)
                     } else {
@@ -381,53 +403,62 @@ fn union_enum_from_type(type_def: &TypeDefinition, boxed: &BTreeSet<(String, Str
                 }
             })
             .collect(),
+        name,
     }
 }
 
-fn operation_binding_from_schema(operation: &SchemaOperation) -> RustOperationBinding {
-    let request_type_name = operation_type_name(operation, "Request");
-    let response_type_name = operation_type_name(operation, "Response");
+fn operation_binding_from_schema(
+    operation: &SchemaOperation,
+    names: &Names,
+) -> RustOperationBinding {
+    let scope = operation_scope_name(operation.operation_type);
+    let request_type_name = names.request_name(scope, &operation.field_name);
+    let response_type_name = names.response_name(scope, &operation.field_name);
 
     RustOperationBinding {
         operation_type: operation_type_literal(operation.operation_type),
         field_name: operation.field_name.clone(),
         request: RustStruct {
-            name: request_type_name,
             fields: operation
                 .arguments
                 .iter()
-                .map(field_from_operation_argument)
+                .map(|argument| field_from_operation_argument(argument, &request_type_name, names))
                 .collect(),
+            name: request_type_name,
         },
         response_alias: RustTypeAlias {
             name: response_type_name,
-            target: rust_type_from_reference(&operation.result_type),
+            target: rust_type_from_reference(&operation.result_type, names),
         },
         directives_json: serde_json::to_string(&operation.directives)
             .expect("schema operation directives should serialize"),
     }
 }
 
-fn field_from_operation_argument(argument: &OperationArgument) -> RustField {
-    let mut ty = rust_type_from_reference(&argument.r#type);
+fn field_from_operation_argument(
+    argument: &OperationArgument,
+    request_type_name: &str,
+    names: &Names,
+) -> RustField {
+    let mut ty = rust_type_from_reference(&argument.r#type, names);
     if argument.default_value.is_some() && !matches!(ty, RustType::Option(_)) {
         ty = RustType::Option(Box::new(ty));
     }
 
     RustField {
         source_name: argument.name.clone(),
-        rust_name: rust_field_name(&argument.name),
+        rust_name: names.field_name(request_type_name, &argument.name),
         ty,
     }
 }
 
-fn rust_type_from_reference(type_ref: &TypeReference) -> RustType {
+fn rust_type_from_reference(type_ref: &TypeReference, names: &Names) -> RustType {
     let base = match type_ref.base.as_str() {
         "ID" | "String" => RustType::String,
         "Int" => RustType::I32,
         "Float" => RustType::F64,
         "Boolean" => RustType::Bool,
-        name => RustType::Named(rust_type_name(name)),
+        name => RustType::Named(names.type_name(name)),
     };
 
     if !type_ref.list_wrappers.is_empty() {
@@ -705,14 +736,6 @@ fn rust_type_name(name: &str) -> String {
     }
 
     candidate
-}
-
-fn operation_type_name(operation: &SchemaOperation, suffix: &str) -> String {
-    rust_type_name(&format!(
-        "{}{}{suffix}",
-        operation_scope_name(operation.operation_type),
-        rust_type_name(&operation.field_name)
-    ))
 }
 
 fn operation_scope_name(operation_type: OperationType) -> &'static str {
