@@ -1291,6 +1291,98 @@ struct PlaybackModeInput {{
     }
 
     #[test]
+    fn directly_recursive_types_compile_with_their_codecs() {
+        compile_models_and_codecs(
+            "direct_recursion",
+            r#"
+            type Node {
+              next: Node
+              parent: Node!
+              children: [Node!]!
+            }
+
+            input Filter {
+              not: Filter
+              and: [Filter!]
+            }
+
+            type Query {
+              node(filter: Filter!): Node
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_types_compile_with_their_codecs() {
+        compile_models_and_codecs(
+            "mutual_recursion",
+            r#"
+            type Author {
+              favourite: Book
+              books: [Book!]!
+            }
+
+            type Book {
+              author: Author!
+              title: String!
+            }
+
+            type Query {
+              book: Book
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn recursion_through_a_union_compiles() {
+        let ir = lower_schema_sdl(
+            r#"
+            type Leaf {
+              value: Int!
+            }
+
+            type Branch {
+              left: Tree!
+              right: Tree
+            }
+
+            union Tree = Leaf | Branch
+            "#,
+        )
+        .expect("schema should lower");
+
+        compile_generated_files("union_recursion", &emit_rust(&ir), "");
+    }
+
+    #[test]
+    fn boxes_only_the_edges_of_a_cycle_that_are_not_behind_a_vec() {
+        let ir = lower_schema_sdl(
+            r#"
+            type Node {
+              next: Node
+              parent: Node!
+              children: [Node!]!
+              leaf: Leaf
+            }
+
+            type Leaf {
+              value: Int!
+            }
+            "#,
+        )
+        .expect("schema should lower");
+
+        let actual = emit_rust(&ir);
+
+        assert!(actual.contains("pub next: Option<Box<Node>>,"), "{actual}");
+        assert!(actual.contains("pub parent: Box<Node>,"), "{actual}");
+        assert!(actual.contains("pub children: Vec<Node>,"), "{actual}");
+        assert!(actual.contains("pub leaf: Option<Leaf>,"), "{actual}");
+    }
+
+    #[test]
     fn golden_codec_schema_compiles_with_its_models() {
         compile_models_and_codecs(
             "golden_codec_schema",
