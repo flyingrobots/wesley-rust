@@ -735,6 +735,7 @@ dependencies = [
  "syn 2.0.119",
  "wesley-core",
  "wesley-emit-codec",
+ "wesley-rust-syntax",
 ]
 
 [[package]]

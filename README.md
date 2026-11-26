@@ -10,6 +10,8 @@ Wesley compiles GraphQL SDL into an intermediate representation (IR), and does n
 
 The emitter does not yet meet the rules below: its model printer is hand-written and its LE-binary codecs are string templates (audit on flyingrobots/wesley#882). Moving both onto `syn` trees printed by `prettyplease` is issue #1.
 
+`crates/wesley-rust-syntax` is the generic Rust syntax tooling that this emitter and other generating programs (such as wesley-parley) build on: naming (`type_name`, `field_name`, `variant_name`), raw-aware identifiers, `///` and `//!` doc attributes, `print_file` over `prettyplease`, and deterministic name de-duplication. It understands no schema and builds no code from strings. The emitter already takes its names from it. See [its README](crates/wesley-rust-syntax/README.md).
+
 ## How it generates code
 
 The output is built as a syntax tree of the target language and printed by that language's printer. There is no string templating and no regex anywhere in the generator.

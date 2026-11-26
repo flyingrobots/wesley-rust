@@ -9,6 +9,10 @@ use wesley_core::{
     Field, LawEntryBodyV1, LawIrV1, OperationArgument, OperationType, ScalarRepresentationV1,
     SchemaOperation, TypeDefinition, TypeKind, TypeReference, WesleyIR,
 };
+use wesley_rust_syntax::naming::{
+    field_name as rust_field_name, snake_case as to_snake_case, type_name as rust_type_name,
+    variant_name as rust_variant_name,
+};
 
 mod le_binary;
 pub use le_binary::{
@@ -651,25 +655,6 @@ fn is_builtin_scalar(name: &str) -> bool {
     matches!(name, "ID" | "String" | "Int" | "Float" | "Boolean")
 }
 
-fn rust_type_name(name: &str) -> String {
-    let mut candidate = sanitize_pascal_identifier(name);
-    if candidate.is_empty() {
-        candidate.push_str("GeneratedType");
-    }
-    if candidate
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_digit())
-    {
-        candidate.insert(0, '_');
-    }
-    if is_reserved_word(&candidate) {
-        candidate.push_str("Type");
-    }
-
-    candidate
-}
-
 fn operation_type_name(operation: &SchemaOperation, suffix: &str) -> String {
     rust_type_name(&format!(
         "{}{}{suffix}",
@@ -684,171 +669,6 @@ fn operation_scope_name(operation_type: OperationType) -> &'static str {
         OperationType::Mutation => "Mutation",
         OperationType::Subscription => "Subscription",
     }
-}
-
-fn rust_variant_name(name: &str) -> String {
-    let mut candidate = if name.contains('_') || name.chars().all(|ch| !ch.is_ascii_lowercase()) {
-        to_pascal_case(name)
-    } else {
-        sanitize_pascal_identifier(name)
-    };
-    if candidate.is_empty() {
-        candidate.push_str("GeneratedVariant");
-    }
-    if candidate
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_digit())
-    {
-        candidate.insert(0, '_');
-    }
-    if is_reserved_word(&candidate) {
-        candidate.push_str("Variant");
-    }
-
-    candidate
-}
-
-fn rust_field_name(name: &str) -> String {
-    let mut candidate = to_snake_case(name);
-    if candidate.is_empty() {
-        candidate.push_str("generated_field");
-    }
-    if candidate
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_digit())
-    {
-        candidate.insert(0, '_');
-    }
-    if is_reserved_word(&candidate) {
-        candidate.insert_str(0, "r#");
-    }
-
-    candidate
-}
-
-fn to_pascal_case(name: &str) -> String {
-    let mut out = String::new();
-    let mut uppercase_next = true;
-
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if uppercase_next {
-                out.push(ch.to_ascii_uppercase());
-                uppercase_next = false;
-            } else {
-                out.push(ch.to_ascii_lowercase());
-            }
-        } else {
-            uppercase_next = true;
-        }
-    }
-
-    out
-}
-
-fn sanitize_pascal_identifier(name: &str) -> String {
-    let mut out = String::new();
-
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else if !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-
-    let mut chars = out.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-
-    if first.is_ascii_alphabetic() || first == '_' {
-        let mut sanitized = String::new();
-        sanitized.push(first.to_ascii_uppercase());
-        sanitized.extend(chars);
-        sanitized.trim_matches('_').to_string()
-    } else {
-        format!("_{}", out.trim_matches('_'))
-    }
-}
-
-fn to_snake_case(name: &str) -> String {
-    let mut out = String::new();
-
-    for (index, ch) in name.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if index > 0 && !out.ends_with('_') {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-            out.push(ch);
-        } else if !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-
-    out.trim_matches('_').to_string()
-}
-
-fn is_reserved_word(name: &str) -> bool {
-    matches!(
-        name,
-        "Self"
-            | "abstract"
-            | "as"
-            | "async"
-            | "await"
-            | "become"
-            | "box"
-            | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "do"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "final"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "macro"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "override"
-            | "priv"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "static"
-            | "struct"
-            | "super"
-            | "trait"
-            | "true"
-            | "try"
-            | "type"
-            | "typeof"
-            | "union"
-            | "unsafe"
-            | "unsized"
-            | "use"
-            | "virtual"
-            | "where"
-            | "while"
-            | "yield"
-    )
 }
 
 fn escape_attribute(value: &str) -> String {
