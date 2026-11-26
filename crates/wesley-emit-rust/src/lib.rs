@@ -234,6 +234,31 @@ enum RustType {
 }
 
 fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1, names: &Names) -> Vec<RustLawItem> {
+    let mut items = law_items_in_law_order(ir, law_ir, names);
+
+    // Validator functions share one scope: names are made unique in law
+    // order, as every other generated name is (see `names`).
+    let function_names = items
+        .iter()
+        .map(|item| match item {
+            RustLawItem::ScalarValidator(validator) => validator.function_name.clone(),
+            RustLawItem::VariantValidator(validator) => validator.function_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    for (item, unique) in items.iter_mut().zip(wesley_rust_syntax::unique_names(
+        &function_names,
+        to_snake_case,
+    )) {
+        match item {
+            RustLawItem::ScalarValidator(validator) => validator.function_name = unique,
+            RustLawItem::VariantValidator(validator) => validator.function_name = unique,
+        }
+    }
+
+    items
+}
+
+fn law_items_in_law_order(ir: &WesleyIR, law_ir: &LawIrV1, names: &Names) -> Vec<RustLawItem> {
     law_ir
         .entries
         .iter()
