@@ -262,7 +262,8 @@ fn scalar_validator_from_law(
     let scalar_name = subject.strip_prefix("scalar:")?;
 
     Some(RustLawItem::ScalarValidator(RustScalarValidator {
-        function_name: format!("validate_{}", rust_field_name(scalar_name)),
+        // A stem inside a longer identifier: plain snake_case, never raw.
+        function_name: format!("validate_{}", to_snake_case(scalar_name)),
         scalar_name: names.type_name(scalar_name),
         min_inclusive: body.min_inclusive,
         max_inclusive: body.max_inclusive,
@@ -297,7 +298,7 @@ fn variant_validator_from_law(
         .collect();
 
     Some(RustLawItem::VariantValidator(RustVariantValidator {
-        function_name: format!("validate_{}_variant", rust_field_name(input_name)),
+        function_name: format!("validate_{}_variant", to_snake_case(input_name)),
         discriminator_field: names.field_name(&input_type, &discriminator.name),
         input_type,
         enum_type,
