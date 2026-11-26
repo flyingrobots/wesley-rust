@@ -1252,6 +1252,33 @@ struct PlaybackModeInput {{
     }
 
     #[test]
+    fn names_come_from_the_shared_syntax_crate() {
+        let ir = lower_schema_sdl(
+            r#"
+            type Example {
+              self: String!
+              userID: ID!
+            }
+            "#,
+        )
+        .expect("schema should lower");
+
+        let actual = emit_rust(&ir);
+
+        syn::parse_file(&actual).expect("generated Rust should parse");
+        assert!(
+            actual.contains("#[serde(rename = \"self\")]\n    pub self_: String,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"userID\")]\n    pub user_id: String,"),
+            "{actual}"
+        );
+        assert_eq!(rust_type_name("foo_bar"), "FooBar");
+        assert_eq!(rust_variant_name("READ_ONLY"), "ReadOnly");
+    }
+
+    #[test]
     fn union_payload_enums_do_not_derive_eq() {
         let ir = lower_schema_sdl(
             r#"
