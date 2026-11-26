@@ -5,8 +5,10 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
+
+use names::Names;
 use wesley_core::{
-    Field, LawEntryBodyV1, LawIrV1, OperationArgument, OperationType, ScalarRepresentationV1,
+    LawEntryBodyV1, LawIrV1, OperationArgument, OperationType, ScalarRepresentationV1,
     SchemaOperation, TypeDefinition, TypeKind, TypeReference, WesleyIR,
 };
 use wesley_rust_syntax::naming::{
@@ -15,6 +17,8 @@ use wesley_rust_syntax::naming::{
 };
 
 mod le_binary;
+mod names;
+mod recursion;
 pub use le_binary::{
     emit_le_binary_rust, DEFAULT_CODEC_IMPORT as LE_BINARY_RUST_DEFAULT_CODEC_IMPORT,
     LE_BINARY_GENERATOR_NAME as LE_BINARY_RUST_GENERATOR_NAME,
@@ -69,7 +73,7 @@ pub fn emit_rust_with_operations_and_law(
         schema_hash: schema_hash.to_string(),
         law_hash: law_hash.to_string(),
     });
-    file.law_items = rust_law_items_from_ir(ir, law_ir);
+    file.law_items = rust_law_items_from_ir(ir, law_ir, &Names::new(ir, operations));
 
     print_file(&file)
 }
@@ -87,6 +91,8 @@ impl RustFile {
     }
 
     fn from_ir_and_operations(ir: &WesleyIR, operations: &[SchemaOperation]) -> Self {
+        let boxed = recursion::boxed_edges(ir);
+        let names = Names::new(ir, operations);
         let mut items = Vec::new();
         let root_type_names = operations
             .iter()
@@ -101,22 +107,24 @@ impl RustFile {
             match type_def.kind {
                 TypeKind::Scalar if is_builtin_scalar(&type_def.name) => {}
                 TypeKind::Scalar => items.push(RustItem::TypeAlias(RustTypeAlias {
-                    name: rust_type_name(&type_def.name),
+                    name: names.type_name(&type_def.name),
                     target: RustType::String,
                 })),
                 TypeKind::Object | TypeKind::Interface | TypeKind::InputObject => {
-                    items.push(RustItem::Struct(struct_from_type(type_def)));
+                    items.push(RustItem::Struct(struct_from_type(type_def, &boxed, &names)));
                 }
-                TypeKind::Enum => items.push(RustItem::Enum(enum_from_type(type_def))),
-                TypeKind::Union => items.push(RustItem::Enum(union_enum_from_type(type_def))),
+                TypeKind::Enum => items.push(RustItem::Enum(enum_from_type(type_def, &names))),
+                TypeKind::Union => {
+                    items.push(RustItem::Enum(union_enum_from_type(
+                        type_def, &boxed, &names,
+                    )));
+                }
             }
         }
 
-        items.extend(
-            operations
-                .iter()
-                .map(|operation| RustItem::Operation(operation_binding_from_schema(operation))),
-        );
+        items.extend(operations.iter().map(|operation| {
+            RustItem::Operation(operation_binding_from_schema(operation, &names))
+        }));
 
         Self {
             provenance: None,
@@ -222,18 +230,19 @@ enum RustType {
     Named(String),
     Vec(Box<RustType>),
     Option(Box<RustType>),
+    Box(Box<RustType>),
 }
 
-fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1) -> Vec<RustLawItem> {
+fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1, names: &Names) -> Vec<RustLawItem> {
     law_ir
         .entries
         .iter()
         .filter_map(|entry| match &entry.body {
             LawEntryBodyV1::ScalarSemantics(body) => {
-                scalar_validator_from_law(&entry.subject, body)
+                scalar_validator_from_law(&entry.subject, body, names)
             }
             LawEntryBodyV1::VariantLaw(body) => {
-                variant_validator_from_law(ir, &entry.subject, body)
+                variant_validator_from_law(ir, &entry.subject, body, names)
             }
             LawEntryBodyV1::FootprintLaw(_)
             | LawEntryBodyV1::ChannelLaw(_)
@@ -245,6 +254,7 @@ fn rust_law_items_from_ir(ir: &WesleyIR, law_ir: &LawIrV1) -> Vec<RustLawItem> {
 fn scalar_validator_from_law(
     subject: &str,
     body: &wesley_core::ScalarSemanticsLawV1,
+    names: &Names,
 ) -> Option<RustLawItem> {
     if body.representation != ScalarRepresentationV1::Integer {
         return None;
@@ -253,7 +263,7 @@ fn scalar_validator_from_law(
 
     Some(RustLawItem::ScalarValidator(RustScalarValidator {
         function_name: format!("validate_{}", rust_field_name(scalar_name)),
-        scalar_name: rust_type_name(scalar_name),
+        scalar_name: names.type_name(scalar_name),
         min_inclusive: body.min_inclusive,
         max_inclusive: body.max_inclusive,
     }))
@@ -263,6 +273,7 @@ fn variant_validator_from_law(
     ir: &WesleyIR,
     subject: &str,
     body: &wesley_core::VariantLawV1,
+    names: &Names,
 ) -> Option<RustLawItem> {
     let input_name = subject.strip_prefix("input:")?;
     let input = ir.types.iter().find(|definition| {
@@ -272,27 +283,34 @@ fn variant_validator_from_law(
         .fields
         .iter()
         .find(|field| field.name == body.discriminator.field)?;
+    let input_type = names.type_name(input_name);
+    let enum_type = names.type_name(&body.discriminator.r#enum);
     let cases = body
         .cases
         .iter()
         .map(|case| RustVariantValidatorCase {
-            enum_variant: rust_variant_name(&case.value),
+            enum_variant: names.variant_name(&enum_type, &case.value),
             case_value: case.value.clone(),
-            requires: dynamic_variant_fields(input, &case.requires),
-            forbids: dynamic_variant_fields(input, &case.forbids),
+            requires: dynamic_variant_fields(input, &input_type, &case.requires, names),
+            forbids: dynamic_variant_fields(input, &input_type, &case.forbids, names),
         })
         .collect();
 
     Some(RustLawItem::VariantValidator(RustVariantValidator {
         function_name: format!("validate_{}_variant", rust_field_name(input_name)),
-        input_type: rust_type_name(input_name),
-        discriminator_field: rust_field_name(&discriminator.name),
-        enum_type: rust_type_name(&body.discriminator.r#enum),
+        discriminator_field: names.field_name(&input_type, &discriminator.name),
+        input_type,
+        enum_type,
         cases,
     }))
 }
 
-fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<String> {
+fn dynamic_variant_fields(
+    input: &TypeDefinition,
+    input_type: &str,
+    fields: &[String],
+    names: &Names,
+) -> Vec<String> {
     fields
         .iter()
         .filter_map(|field_name| {
@@ -300,8 +318,11 @@ fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<Stri
                 .fields
                 .iter()
                 .find(|field| field.name == *field_name)?;
-            if matches!(rust_type_from_reference(&field.r#type), RustType::Option(_)) {
-                Some(rust_field_name(field_name))
+            if matches!(
+                rust_type_from_reference(&field.r#type, names),
+                RustType::Option(_)
+            ) {
+                Some(names.field_name(input_type, field_name))
             } else {
                 None
             }
@@ -309,97 +330,139 @@ fn dynamic_variant_fields(input: &TypeDefinition, fields: &[String]) -> Vec<Stri
         .collect()
 }
 
-fn struct_from_type(type_def: &TypeDefinition) -> RustStruct {
+fn struct_from_type(
+    type_def: &TypeDefinition,
+    boxed: &BTreeSet<(String, String)>,
+    names: &Names,
+) -> RustStruct {
+    let name = names.type_name(&type_def.name);
     RustStruct {
-        name: rust_type_name(&type_def.name),
-        fields: type_def.fields.iter().map(field_from_ir).collect(),
+        fields: type_def
+            .fields
+            .iter()
+            .map(|field| {
+                let is_cycle_edge = boxed.contains(&(type_def.name.clone(), field.name.clone()));
+                let ty = rust_type_from_reference(&field.r#type, names);
+                RustField {
+                    source_name: field.name.clone(),
+                    rust_name: names.field_name(&name, &field.name),
+                    ty: if is_cycle_edge { box_named(ty) } else { ty },
+                }
+            })
+            .collect(),
+        name,
     }
 }
 
-fn field_from_ir(field: &Field) -> RustField {
-    RustField {
-        source_name: field.name.clone(),
-        rust_name: rust_field_name(&field.name),
-        ty: rust_type_from_reference(&field.r#type),
+/// Puts the named type inside `ty` behind a `Box`: `Node` becomes `Box<Node>`
+/// and `Option<Node>` becomes `Option<Box<Node>>`. Only by-value references
+/// are cycle edges (see [`recursion`]), so a `Vec` never reaches here.
+fn box_named(ty: RustType) -> RustType {
+    match ty {
+        RustType::Named(_) => RustType::Box(Box::new(ty)),
+        RustType::Option(inner) => RustType::Option(Box::new(box_named(*inner))),
+        other => other,
     }
 }
 
-fn enum_from_type(type_def: &TypeDefinition) -> RustEnum {
+fn enum_from_type(type_def: &TypeDefinition, names: &Names) -> RustEnum {
+    let name = names.type_name(&type_def.name);
     RustEnum {
-        name: rust_type_name(&type_def.name),
         derive_eq: true,
         variants: type_def
             .enum_values
             .iter()
             .map(|value| RustVariant {
                 source_name: value.clone(),
-                rust_name: rust_variant_name(value),
+                rust_name: names.variant_name(&name, value),
                 payload: None,
             })
             .collect(),
+        name,
     }
 }
 
-fn union_enum_from_type(type_def: &TypeDefinition) -> RustEnum {
+fn union_enum_from_type(
+    type_def: &TypeDefinition,
+    boxed: &BTreeSet<(String, String)>,
+    names: &Names,
+) -> RustEnum {
+    let name = names.type_name(&type_def.name);
     RustEnum {
-        name: rust_type_name(&type_def.name),
         derive_eq: false,
         variants: type_def
             .union_members
             .iter()
-            .map(|member| RustVariant {
-                source_name: member.clone(),
-                rust_name: rust_variant_name(member),
-                payload: Some(RustType::Named(rust_type_name(member))),
+            .map(|member| {
+                let payload = RustType::Named(names.type_name(member));
+                let is_cycle_edge = boxed.contains(&(type_def.name.clone(), member.clone()));
+                RustVariant {
+                    source_name: member.clone(),
+                    rust_name: names.variant_name(&name, member),
+                    payload: Some(if is_cycle_edge {
+                        box_named(payload)
+                    } else {
+                        payload
+                    }),
+                }
             })
             .collect(),
+        name,
     }
 }
 
-fn operation_binding_from_schema(operation: &SchemaOperation) -> RustOperationBinding {
-    let request_type_name = operation_type_name(operation, "Request");
-    let response_type_name = operation_type_name(operation, "Response");
+fn operation_binding_from_schema(
+    operation: &SchemaOperation,
+    names: &Names,
+) -> RustOperationBinding {
+    let scope = operation_scope_name(operation.operation_type);
+    let request_type_name = names.request_name(scope, &operation.field_name);
+    let response_type_name = names.response_name(scope, &operation.field_name);
 
     RustOperationBinding {
         operation_type: operation_type_literal(operation.operation_type),
         field_name: operation.field_name.clone(),
         request: RustStruct {
-            name: request_type_name,
             fields: operation
                 .arguments
                 .iter()
-                .map(field_from_operation_argument)
+                .map(|argument| field_from_operation_argument(argument, &request_type_name, names))
                 .collect(),
+            name: request_type_name,
         },
         response_alias: RustTypeAlias {
             name: response_type_name,
-            target: rust_type_from_reference(&operation.result_type),
+            target: rust_type_from_reference(&operation.result_type, names),
         },
         directives_json: serde_json::to_string(&operation.directives)
             .expect("schema operation directives should serialize"),
     }
 }
 
-fn field_from_operation_argument(argument: &OperationArgument) -> RustField {
-    let mut ty = rust_type_from_reference(&argument.r#type);
+fn field_from_operation_argument(
+    argument: &OperationArgument,
+    request_type_name: &str,
+    names: &Names,
+) -> RustField {
+    let mut ty = rust_type_from_reference(&argument.r#type, names);
     if argument.default_value.is_some() && !matches!(ty, RustType::Option(_)) {
         ty = RustType::Option(Box::new(ty));
     }
 
     RustField {
         source_name: argument.name.clone(),
-        rust_name: rust_field_name(&argument.name),
+        rust_name: names.field_name(request_type_name, &argument.name),
         ty,
     }
 }
 
-fn rust_type_from_reference(type_ref: &TypeReference) -> RustType {
+fn rust_type_from_reference(type_ref: &TypeReference, names: &Names) -> RustType {
     let base = match type_ref.base.as_str() {
         "ID" | "String" => RustType::String,
         "Int" => RustType::I32,
         "Float" => RustType::F64,
         "Boolean" => RustType::Bool,
-        name => RustType::Named(rust_type_name(name)),
+        name => RustType::Named(names.type_name(name)),
     };
 
     if !type_ref.list_wrappers.is_empty() {
@@ -640,6 +703,11 @@ fn print_type(out: &mut String, ty: &RustType) {
             print_type(out, item);
             out.push('>');
         }
+        RustType::Box(item) => {
+            out.push_str("Box<");
+            print_type(out, item);
+            out.push('>');
+        }
     }
 }
 
@@ -653,14 +721,6 @@ fn operation_type_literal(operation_type: OperationType) -> &'static str {
 
 fn is_builtin_scalar(name: &str) -> bool {
     matches!(name, "ID" | "String" | "Int" | "Float" | "Boolean")
-}
-
-fn operation_type_name(operation: &SchemaOperation, suffix: &str) -> String {
-    rust_type_name(&format!(
-        "{}{}{suffix}",
-        operation_scope_name(operation.operation_type),
-        rust_type_name(&operation.field_name)
-    ))
 }
 
 fn operation_scope_name(operation_type: OperationType) -> &'static str {
@@ -1119,6 +1179,252 @@ struct PlaybackModeInput {{
         ));
     }
 
+    #[test]
+    fn float_fields_compile_with_their_le_binary_codecs() {
+        compile_models_and_codecs(
+            "float_codecs",
+            r#"
+            type Measurement {
+              ratio: Float!
+              maybeRatio: Float
+              samples: [Float!]!
+            }
+
+            type Query {
+              measurement(scale: Float!, offset: Float): Measurement!
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn directly_recursive_types_compile_with_their_codecs() {
+        compile_models_and_codecs(
+            "direct_recursion",
+            r#"
+            type Node {
+              next: Node
+              parent: Node!
+              children: [Node!]!
+            }
+
+            input Filter {
+              not: Filter
+              and: [Filter!]
+            }
+
+            type Query {
+              node(filter: Filter!): Node
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_types_compile_with_their_codecs() {
+        compile_models_and_codecs(
+            "mutual_recursion",
+            r#"
+            type Author {
+              favourite: Book
+              books: [Book!]!
+            }
+
+            type Book {
+              author: Author!
+              title: String!
+            }
+
+            type Query {
+              book: Book
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn recursion_through_a_union_compiles() {
+        let ir = lower_schema_sdl(
+            r#"
+            type Leaf {
+              value: Int!
+            }
+
+            type Branch {
+              left: Tree!
+              right: Tree
+            }
+
+            union Tree = Leaf | Branch
+            "#,
+        )
+        .expect("schema should lower");
+
+        compile_generated_files("union_recursion", &emit_rust(&ir), "");
+    }
+
+    #[test]
+    fn boxes_only_the_edges_of_a_cycle_that_are_not_behind_a_vec() {
+        let ir = lower_schema_sdl(
+            r#"
+            type Node {
+              next: Node
+              parent: Node!
+              children: [Node!]!
+              leaf: Leaf
+            }
+
+            type Leaf {
+              value: Int!
+            }
+            "#,
+        )
+        .expect("schema should lower");
+
+        let actual = emit_rust(&ir);
+
+        assert!(actual.contains("pub next: Option<Box<Node>>,"), "{actual}");
+        assert!(actual.contains("pub parent: Box<Node>,"), "{actual}");
+        assert!(actual.contains("pub children: Vec<Node>,"), "{actual}");
+        assert!(actual.contains("pub leaf: Option<Leaf>,"), "{actual}");
+    }
+
+    const COLLIDING_NAMES_SDL: &str = r#"
+        enum Mode {
+          fooBar
+          FOO_BAR
+        }
+
+        type Example {
+          fooBar: String
+          foo_bar: Int
+          foo_bar_2: Boolean
+          type: String
+          Type: Int
+          mode: Mode
+        }
+
+        type Thing {
+          a: Int
+        }
+
+        type _Thing {
+          b: Int
+        }
+
+        type foo_bar {
+          c: Int
+        }
+
+        type FooBar {
+          d: Int
+        }
+
+        union Either = foo_bar | FooBar
+
+        type Query {
+          find(fooBar: Int, foo_bar: String): Example
+        }
+    "#;
+
+    #[test]
+    fn colliding_names_compile_with_their_codecs() {
+        compile_models_and_codecs("colliding_names", COLLIDING_NAMES_SDL);
+    }
+
+    #[test]
+    fn colliding_names_are_disambiguated_in_order_keeping_wire_names() {
+        let ir = lower_schema_sdl(COLLIDING_NAMES_SDL).expect("schema should lower");
+        let operations =
+            list_schema_operations_sdl(COLLIDING_NAMES_SDL).expect("operations should resolve");
+
+        let actual = emit_rust_with_operations(&ir, &operations);
+        let file = syn::parse_file(&actual).expect("generated Rust should parse");
+        let mut seen = BTreeSet::new();
+        for item in &file.items {
+            if let syn::Item::Struct(item) = item {
+                assert!(seen.insert(item.ident.to_string()), "{actual}");
+            }
+            if let syn::Item::Enum(item) = item {
+                assert!(seen.insert(item.ident.to_string()), "{actual}");
+            }
+        }
+
+        // A field keeps its own name when that name is free; a later field
+        // that normalises to a taken name gets the first free `_N` suffix,
+        // and its wire name stays in `serde(rename)`.
+        assert!(
+            actual.contains("#[serde(rename = \"fooBar\")]\n    pub foo_bar: Option<String>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"foo_bar\")]\n    pub foo_bar_3: Option<i32>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("    pub foo_bar_2: Option<bool>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("    pub r#type: Option<String>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"Type\")]\n    pub type_2: Option<i32>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"FOO_BAR\")]\n    FooBar2,"),
+            "{actual}"
+        );
+        assert!(actual.contains("pub struct Thing {"), "{actual}");
+        assert!(actual.contains("pub struct Thing2 {"), "{actual}");
+        assert!(actual.contains("    pub mode: Option<Mode>,"), "{actual}");
+        assert!(
+            actual.contains("#[serde(rename = \"foo_bar\")]\n    pub foo_bar_2: Option<String>,"),
+            "{actual}"
+        );
+    }
+
+    #[test]
+    fn golden_codec_schema_compiles_with_its_models() {
+        compile_models_and_codecs(
+            "golden_codec_schema",
+            include_str!("../../../test/fixtures/typescript-emitter/le-binary-codec.graphql"),
+        );
+    }
+
+    #[test]
+    fn float_codecs_narrow_on_write_and_widen_on_read_explicitly() {
+        let sdl = r#"
+            input Scale {
+              ratio: Float!
+              maybeRatio: Float
+            }
+        "#;
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+        let codecs = emit_le_binary_rust(&ir, &[], LE_BINARY_RUST_DEFAULT_CODEC_IMPORT);
+
+        assert!(
+            codecs.contains("writer.write_f32_le(value.ratio as f32);"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains("writer.write_option(&value.maybe_ratio, |writer, x| writer.write_f32_le(*x as f32));"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains("ratio: reader.read_f32_le().map(f64::from)?,"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains(
+                "maybe_ratio: reader.read_option(|reader| reader.read_f32_le().map(f64::from))?,"
+            ),
+            "{codecs}"
+        );
+    }
+
     fn rust_operation_impl_block<'a>(actual: &'a str, request_name: &str) -> &'a str {
         let marker = format!("impl {request_name} {{");
         let start = actual
@@ -1171,6 +1477,75 @@ struct PlaybackModeInput {{
             output.status.success(),
             "generated Rust should compile\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Emits models (with operation bindings) and LE-binary codecs for `sdl`
+    /// and compiles them together with `rustc`, offline: `serde` is a
+    /// proc-macro stub and the codec runtime is a minimal fixture.
+    fn compile_models_and_codecs(test_name: &str, sdl: &str) {
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+        let operations = list_schema_operations_sdl(sdl).expect("operations should resolve");
+        let models = emit_rust_with_operations(&ir, &operations);
+        let codecs = emit_le_binary_rust(&ir, &operations, LE_BINARY_RUST_DEFAULT_CODEC_IMPORT);
+        compile_generated_files(test_name, &models, &codecs);
+    }
+
+    /// Compiles generated `models` and `codecs` with `rustc` inside the
+    /// fixture harness crate.
+    fn compile_generated_files(test_name: &str, models: &str, codecs: &str) {
+        let harness = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test/fixtures/rust-emitter/compile-harness");
+        let dir = temporary_compile_dir(test_name);
+        fs::create_dir_all(&dir).expect("temporary compile directory should create");
+        for file in ["lib.rs", "codec_runtime.rs", "serde.rs"] {
+            fs::copy(harness.join(file), dir.join(file)).expect("harness file should copy");
+        }
+        fs::write(dir.join("models.rs"), models).expect("generated models should write");
+        fs::write(dir.join("codecs.rs"), codecs).expect("generated codecs should write");
+
+        let serde = Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-type=proc-macro",
+                "--crate-name=serde",
+            ])
+            .arg(dir.join("serde.rs"))
+            .arg("--out-dir")
+            .arg(&dir)
+            .output()
+            .expect("rustc should run");
+        assert!(
+            serde.status.success(),
+            "serde stub should compile\nstderr:\n{}",
+            String::from_utf8_lossy(&serde.stderr)
+        );
+        let serde_lib = dir.join(format!(
+            "{}serde{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+
+        let output = Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-type=lib",
+                "--crate-name=generated",
+            ])
+            .arg("--extern")
+            .arg(format!("serde={}", serde_lib.display()))
+            .arg(dir.join("lib.rs"))
+            .arg("--out-dir")
+            .arg(&dir)
+            .output()
+            .expect("rustc should run");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "generated models and codecs should compile\nmodels:\n{models}\ncodecs:\n{codecs}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }

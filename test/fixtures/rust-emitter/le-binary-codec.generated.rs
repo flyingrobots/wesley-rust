@@ -121,7 +121,7 @@ pub fn decode_make_widget_input(bytes: &[u8]) -> Result<MakeWidgetInput, CodecEr
 fn enc_make_widget_input(writer: &mut Writer, value: &MakeWidgetInput) {
     writer.write_string(&value.label);
     writer.write_i32_le(value.count);
-    writer.write_f32_le(value.ratio);
+    writer.write_f32_le(value.ratio as f32);
     writer.write_bool(value.enabled);
     writer.write_option(&value.color, |writer, x| enc_color(writer, x));
     enc_solo(writer, &value.solo);
@@ -137,7 +137,7 @@ fn dec_make_widget_input(reader: &mut Reader) -> Result<MakeWidgetInput, CodecEr
     Ok(MakeWidgetInput {
         label: reader.read_string()?,
         count: reader.read_i32_le()?,
-        ratio: reader.read_f32_le()?,
+        ratio: reader.read_f32_le().map(f64::from)?,
         enabled: reader.read_bool()?,
         color: reader.read_option(|reader| dec_color(reader))?,
         solo: dec_solo(reader)?,
