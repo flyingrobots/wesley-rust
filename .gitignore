@@ -1,0 +1,14 @@
+/target/
+
+# Operating system and editor files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.obsidian/
+.idea/
+.vscode/
+*.swp
+
+# Local agent notes
+.claude/
