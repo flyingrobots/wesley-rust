@@ -1419,6 +1419,103 @@ struct PlaybackModeInput {{
         assert!(actual.contains("pub leaf: Option<Leaf>,"), "{actual}");
     }
 
+    const COLLIDING_NAMES_SDL: &str = r#"
+        enum Mode {
+          fooBar
+          FOO_BAR
+        }
+
+        type Example {
+          fooBar: String
+          foo_bar: Int
+          foo_bar_2: Boolean
+          type: String
+          Type: Int
+          mode: Mode
+        }
+
+        type Thing {
+          a: Int
+        }
+
+        type _Thing {
+          b: Int
+        }
+
+        type foo_bar {
+          c: Int
+        }
+
+        type FooBar {
+          d: Int
+        }
+
+        union Either = foo_bar | FooBar
+
+        type Query {
+          find(fooBar: Int, foo_bar: String): Example
+        }
+    "#;
+
+    #[test]
+    fn colliding_names_compile_with_their_codecs() {
+        compile_models_and_codecs("colliding_names", COLLIDING_NAMES_SDL);
+    }
+
+    #[test]
+    fn colliding_names_are_disambiguated_in_order_keeping_wire_names() {
+        let ir = lower_schema_sdl(COLLIDING_NAMES_SDL).expect("schema should lower");
+        let operations =
+            list_schema_operations_sdl(COLLIDING_NAMES_SDL).expect("operations should resolve");
+
+        let actual = emit_rust_with_operations(&ir, &operations);
+        let file = syn::parse_file(&actual).expect("generated Rust should parse");
+        let mut seen = BTreeSet::new();
+        for item in &file.items {
+            if let syn::Item::Struct(item) = item {
+                assert!(seen.insert(item.ident.to_string()), "{actual}");
+            }
+            if let syn::Item::Enum(item) = item {
+                assert!(seen.insert(item.ident.to_string()), "{actual}");
+            }
+        }
+
+        // A field keeps its own name when that name is free; a later field
+        // that normalises to a taken name gets the first free `_N` suffix,
+        // and its wire name stays in `serde(rename)`.
+        assert!(
+            actual.contains("#[serde(rename = \"fooBar\")]\n    pub foo_bar: Option<String>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"foo_bar\")]\n    pub foo_bar_3: Option<i32>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("    pub foo_bar_2: Option<bool>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("    pub r#type: Option<String>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"Type\")]\n    pub type_2: Option<i32>,"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("#[serde(rename = \"FOO_BAR\")]\n    FooBar2,"),
+            "{actual}"
+        );
+        assert!(actual.contains("pub struct Thing {"), "{actual}");
+        assert!(actual.contains("pub struct Thing2 {"), "{actual}");
+        assert!(actual.contains("    pub mode: Option<Mode>,"), "{actual}");
+        assert!(
+            actual.contains("#[serde(rename = \"foo_bar\")]\n    pub foo_bar_2: Option<String>,"),
+            "{actual}"
+        );
+    }
+
     #[test]
     fn golden_codec_schema_compiles_with_its_models() {
         compile_models_and_codecs(
