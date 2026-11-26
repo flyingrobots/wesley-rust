@@ -17,48 +17,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use wesley_core::{SchemaOperation, TypeKind, WesleyIR};
+use wesley_rust_syntax::unique_names;
 
 use crate::{
     is_builtin_scalar, operation_scope_name, rust_field_name, rust_type_name, rust_variant_name,
     to_snake_case,
 };
-
-/// Normalises each of `names` with `normalise` and makes the results unique,
-/// deterministically.
-///
-/// Names are taken in order. A name whose normalised form is not yet taken
-/// keeps it. A later name whose form is taken gets the first suffix `N`
-/// (counting from 2) that gives a form neither taken nor the unsuffixed form
-/// of any name in the list, so a name that is unique on its own never loses
-/// its form to a suffixed one. The suffix is appended directly to a
-/// PascalCase form (`Thing2`) and after an underscore otherwise (`foo_bar_2`),
-/// and the result is normalised again (a raw `r#type` becomes `type_2`).
-pub(crate) fn unique_names(names: &[String], normalise: fn(&str) -> String) -> Vec<String> {
-    let forms = names.iter().map(|name| normalise(name)).collect::<Vec<_>>();
-    let reserved = forms.iter().cloned().collect::<BTreeSet<_>>();
-    let mut taken = BTreeSet::new();
-
-    forms
-        .into_iter()
-        .map(|form| {
-            if taken.insert(form.clone()) {
-                return form;
-            }
-            let stem = form.strip_prefix("r#").unwrap_or(&form);
-            let separator = if stem.starts_with(|ch: char| ch.is_ascii_uppercase()) {
-                ""
-            } else {
-                "_"
-            };
-            let chosen = (2_u64..)
-                .map(|suffix| normalise(&format!("{stem}{separator}{suffix}")))
-                .find(|candidate| !reserved.contains(candidate) && !taken.contains(candidate))
-                .expect("an unbounded suffix range always yields a free name");
-            taken.insert(chosen.clone());
-            chosen
-        })
-        .collect()
-}
 
 /// A type the emitter names: a type of the IR, or a type it generates for an
 /// operation (keyed by operation scope and root field name).
