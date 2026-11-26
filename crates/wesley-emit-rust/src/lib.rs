@@ -979,6 +979,67 @@ struct PlaybackModeInput {{
     }
 
     #[test]
+    fn validators_for_keyword_named_types_compile() {
+        let sdl = r#"
+            scalar Gen
+
+            enum Kind {
+              ON
+              OFF
+            }
+
+            input Type {
+              kind: Kind!
+              target: Gen
+            }
+        "#;
+        let law_ir = load_weslaw_yaml(
+            r#"
+apiVersion: weslaw/v1
+schema:
+  family: keyword-named-validators
+  hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  source: inline.graphql
+laws:
+  - id: keyword.scalar.gen
+    status: active
+    kind: scalarSemantics
+    subject: scalar:Gen
+    semantics:
+      representation: integer
+      minInclusive: 1
+    rationale: A scalar whose snake_case name is a keyword.
+  - id: keyword.variant.type
+    status: active
+    kind: variantLaw
+    subject: input:Type
+    discriminator:
+      field: kind
+      enum: Kind
+    cases:
+      - value: ON
+        requires: [target]
+      - value: OFF
+        forbids: [target]
+"#,
+        )
+        .expect("law should load");
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+
+        let actual = emit_rust_with_operations_and_law(&ir, &[], "schema", "law", &law_ir);
+
+        assert!(
+            actual.contains("pub fn validate_gen(value: u64)"),
+            "{actual}"
+        );
+        assert!(
+            actual.contains("pub fn validate_type_variant(value: &Type)"),
+            "{actual}"
+        );
+        compile_generated_files("keyword_named_validators", &actual, "");
+    }
+
+    #[test]
     fn law_backed_generated_rust_compiles_as_crate() {
         let sdl = include_str!("../../../test/fixtures/weslaw/contract-bundle-shape.graphql");
         let law_ir = load_weslaw_yaml(include_str!(
