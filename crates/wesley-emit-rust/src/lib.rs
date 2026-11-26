@@ -1272,6 +1272,55 @@ struct PlaybackModeInput {{
         ));
     }
 
+    #[test]
+    fn float_fields_compile_with_their_le_binary_codecs() {
+        compile_models_and_codecs(
+            "float_codecs",
+            r#"
+            type Measurement {
+              ratio: Float!
+              maybeRatio: Float
+              samples: [Float!]!
+            }
+
+            type Query {
+              measurement(scale: Float!, offset: Float): Measurement!
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn float_codecs_narrow_on_write_and_widen_on_read_explicitly() {
+        let sdl = r#"
+            input Scale {
+              ratio: Float!
+              maybeRatio: Float
+            }
+        "#;
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+        let codecs = emit_le_binary_rust(&ir, &[], LE_BINARY_RUST_DEFAULT_CODEC_IMPORT);
+
+        assert!(
+            codecs.contains("writer.write_f32_le(value.ratio as f32);"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains("writer.write_option(&value.maybe_ratio, |writer, x| writer.write_f32_le(*x as f32));"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains("ratio: reader.read_f32_le().map(f64::from)?,"),
+            "{codecs}"
+        );
+        assert!(
+            codecs.contains(
+                "maybe_ratio: reader.read_option(|reader| reader.read_f32_le().map(f64::from))?,"
+            ),
+            "{codecs}"
+        );
+    }
+
     fn rust_operation_impl_block<'a>(actual: &'a str, request_name: &str) -> &'a str {
         let marker = format!("impl {request_name} {{");
         let start = actual
@@ -1324,6 +1373,75 @@ struct PlaybackModeInput {{
             output.status.success(),
             "generated Rust should compile\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Emits models (with operation bindings) and LE-binary codecs for `sdl`
+    /// and compiles them together with `rustc`, offline: `serde` is a
+    /// proc-macro stub and the codec runtime is a minimal fixture.
+    fn compile_models_and_codecs(test_name: &str, sdl: &str) {
+        let ir = lower_schema_sdl(sdl).expect("schema should lower");
+        let operations = list_schema_operations_sdl(sdl).expect("operations should resolve");
+        let models = emit_rust_with_operations(&ir, &operations);
+        let codecs = emit_le_binary_rust(&ir, &operations, LE_BINARY_RUST_DEFAULT_CODEC_IMPORT);
+        compile_generated_files(test_name, &models, &codecs);
+    }
+
+    /// Compiles generated `models` and `codecs` with `rustc` inside the
+    /// fixture harness crate.
+    fn compile_generated_files(test_name: &str, models: &str, codecs: &str) {
+        let harness = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test/fixtures/rust-emitter/compile-harness");
+        let dir = temporary_compile_dir(test_name);
+        fs::create_dir_all(&dir).expect("temporary compile directory should create");
+        for file in ["lib.rs", "codec_runtime.rs", "serde.rs"] {
+            fs::copy(harness.join(file), dir.join(file)).expect("harness file should copy");
+        }
+        fs::write(dir.join("models.rs"), models).expect("generated models should write");
+        fs::write(dir.join("codecs.rs"), codecs).expect("generated codecs should write");
+
+        let serde = Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-type=proc-macro",
+                "--crate-name=serde",
+            ])
+            .arg(dir.join("serde.rs"))
+            .arg("--out-dir")
+            .arg(&dir)
+            .output()
+            .expect("rustc should run");
+        assert!(
+            serde.status.success(),
+            "serde stub should compile\nstderr:\n{}",
+            String::from_utf8_lossy(&serde.stderr)
+        );
+        let serde_lib = dir.join(format!(
+            "{}serde{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+
+        let output = Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-type=lib",
+                "--crate-name=generated",
+            ])
+            .arg("--extern")
+            .arg(format!("serde={}", serde_lib.display()))
+            .arg(dir.join("lib.rs"))
+            .arg("--out-dir")
+            .arg(&dir)
+            .output()
+            .expect("rustc should run");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "generated models and codecs should compile\nmodels:\n{models}\ncodecs:\n{codecs}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
