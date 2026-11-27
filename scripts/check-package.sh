@@ -20,7 +20,26 @@ for file in LICENSE NOTICE; do
   fi
 done
 
-readme="$(cargo metadata --format-version 1 --no-deps --locked --manifest-path "$root/Cargo.toml" |
+metadata="$(cargo metadata --format-version 1 --no-deps --locked --manifest-path "$root/Cargo.toml")"
+
+# A workspace crate that depends on this one by path pins exactly its version,
+# so that a later publish of the dependent names the released crate. A pin
+# left at an older version after a version bump fails here with that name.
+version="$(printf '%s\n' "$metadata" |
+  jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version')"
+stale="$(printf '%s\n' "$metadata" |
+  jq -r --arg crate "$crate" --arg want "=$version" '
+    .packages[] | .name as $dependent | .dependencies[]
+    | select(.name == $crate and .path != null and .req != $want)
+    | "\($dependent) requires \($crate) \(.req)"')"
+if [ -n "$stale" ]; then
+  printf '%s\n' "$stale" | while IFS= read -r line; do
+    echo "error: $line; it must pin =$version, the crate's version" >&2
+  done
+  status=1
+fi
+
+readme="$(printf '%s\n' "$metadata" |
   jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .readme // empty')"
 if [ -z "$readme" ]; then
   echo "error: $crate names no readme in its manifest" >&2
