@@ -6,7 +6,14 @@ A release is an annotated tag `v<version>` on `main`, where `<version>` is the `
 
 ## 1. Merge the release-prep pull request
 
-The release-prep pull request sets the crate's `version`, turns `## Unreleased` in [CHANGELOG.md](CHANGELOG.md) into `## [<version>] - <date>` with an empty `## Unreleased` above it, and passes `checks`, which runs `cargo publish --dry-run --locked -p wesley-rust-syntax` and `scripts/check-package.sh`. Merge it with a merge commit.
+The release-prep pull request:
+
+- sets `version` in `crates/wesley-rust-syntax/Cargo.toml`;
+- sets `wesley-emit-rust`'s path dependency on it to the same exact version (`wesley-rust-syntax = { path = "../wesley-rust-syntax", version = "=<version>" }` in `crates/wesley-emit-rust/Cargo.toml`), because Cargo checks that requirement against the local crate and the workspace does not build while it names the old version;
+- refreshes `Cargo.lock` (`cargo update -p wesley-rust-syntax`) so that `--locked` passes, and commits it;
+- turns `## Unreleased` in [CHANGELOG.md](CHANGELOG.md) into `## [<version>] - <date>` with an empty `## Unreleased` above it.
+
+It must pass `checks`, which runs `cargo publish --dry-run --locked -p wesley-rust-syntax` and `scripts/check-package.sh`; the script fails when a workspace crate's path dependency on `wesley-rust-syntax` does not pin exactly its version. Merge it with a merge commit.
 
 ## 2. Tag `main` and push the tag
 
