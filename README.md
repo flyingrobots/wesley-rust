@@ -12,6 +12,8 @@ The emitter does not yet meet the rules below: its model printer is hand-written
 
 `crates/wesley-rust-syntax` is the generic Rust syntax tooling that this emitter and other generating programs (such as wesley-parley) build on: naming (`type_name`, `field_name`, `variant_name`), raw-aware identifiers, `///` and `//!` doc attributes, `print_file` over `prettyplease`, and deterministic name de-duplication. It understands no schema and builds no code from strings. The emitter already takes its names from it. See [its README](crates/wesley-rust-syntax/README.md).
 
+`wesley-rust-syntax` is the one crate this repository publishes to crates.io; `wesley-emit-rust` stays `publish = false` until flyingrobots/wesley#882 releases it. [RELEASING.md](RELEASING.md) describes how a release is tagged, approved and verified.
+
 ## How it generates code
 
 The output is built as a syntax tree of the target language and printed by that language's printer. There is no string templating and no regex anywhere in the generator.
