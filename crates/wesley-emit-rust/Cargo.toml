@@ -10,12 +10,19 @@ homepage = "https://github.com/flyingrobots/wesley-rust#readme"
 documentation = "https://docs.rs/wesley-emit-rust"
 keywords = ["graphql", "compiler", "rust", "codegen"]
 categories = ["compilers"]
+# Not published from this repository yet. crates.io already has 0.3.0-alpha.4,
+# released from flyingrobots/wesley; the emitter's next release belongs to
+# Wesley's major-version change (flyingrobots/wesley#882). Until then this
+# repository's release workflow can only ever publish wesley-rust-syntax.
+publish = false
 
 [dependencies]
 serde_json = "1.0"
 wesley-core = "=0.3.0-alpha.4"
 wesley-emit-codec = "=0.3.0-alpha.4"
-wesley-rust-syntax = { path = "../wesley-rust-syntax", version = "0.1.0" }
+# The version is pinned exactly as well as the path, so that a later publish
+# of the emitter depends on the released wesley-rust-syntax.
+wesley-rust-syntax = { path = "../wesley-rust-syntax", version = "=0.1.0-alpha.1" }
 
 [dev-dependencies]
 pretty_assertions = "1.4"
